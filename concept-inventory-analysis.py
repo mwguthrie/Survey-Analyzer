@@ -1,204 +1,279 @@
-"""
-Concept Inventory Pre/Post Analysis Tool
-=======================================
-
-This script ingests two CSV files containing student responses to pre‑tests and
-post‑tests for one of three concept inventories:
-
-* EMCS   – Electric & Magnetic Concept Survey
-* BEMA   – Brief Electricity & Magnetism Assessment
-* EBAPS  – Epistemological Beliefs Assessment for Physical Science
-
-For each inventory a keyed answer list and the position of the built‑in
-attention‑check question are hard‑coded below.
-
-The program grades each submission, validates attention‑check compliance,
-performs fuzzy matching on the self‑reported *unique identifier* to pair pre
-and post attempts, and produces summary statistics including normalized gain.
-
-Usage (CLI)  >>>  python concept_inventory_analysis.py pre.csv post.csv --test BEMA
-
-Dependencies
-------------
-* pandas
-* numpy
-"""
-from __future__ import annotations
-
-import argparse
-import difflib
-import itertools
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, List, Tuple
-
-import numpy as np
 import pandas as pd
+from fuzzywuzzy import process
 
-############################
-# Hard‑coded Test Meta‑Data #
-############################
 
-TEST_KEYS: Dict[str, Dict[str, List[str] | int | str]] = {
-    "EMCS": {
-        "key": [
-            "1", "5", "2", "1", "4", "3", "5", "3", "1", "4", "5", "4",
-            "3", "4", "1", "3", "2", "5", "2", "1", "3", "4", "2", "1",
-            "1", "5"
-        ],
-        "attention_idx": 17,  # zero‑based index of attention‑check question
-        "attention_answer": "5",
-    },
-    "BEMA": {
-        "key": [
-            "C", "D", "A", "B", "C", "D", "A", "B", "D", "C",
-            "A", "B", "C", "D", "A", "C", "B", "D", "A", "B",
-            "C", "D", "A", "B"  
-        ],
-        "attention_idx": 12,
-        "attention_answer": "C",
-    },
-    "EBAPS": {
-        "key": [
-            "A", "B", "B", "C", "D", "A", "C", "D", "B", "A",
-            "C", "D", "B", "A", "C", "B", "D", "A", "C", "B",
-        ],
-        "attention_idx": 4,
-        "attention_answer": "D",
-    },
+# CONFIGURATION: put your CSV paths and test type here
+PRE_PATH   = 'EMCS Pre - 1501-007 - Fa23_May 7, 2025_11.26.csv'
+POST_PATH  = 'EMCS Post - 1501-007 - Fa23_May 7, 2025_11.26.csv'
+TEST_TYPE  = 'EMCS'   # "EMCS' or 'BEMA' or 'EBAPS'
+
+
+# ANSWER KEYS
+
+# EMCS: 25 scored questions + attention Q34, ID Q35
+EMCS_KEY = {
+    **{f'Q{i}': str(ans) for i, ans in zip(range(1,26),
+        [2,5,2,1,4,3,5,3,1,4,5,4,3,4,1,3,2,5,2,1,3,4,2,1,5])}
+}
+EMCS_ATT_Q, EMCS_ATT_A = 'Q34', '5'
+EMCS_ID = 'Q35'
+
+# BEMA: individual keys plus the special rules
+# first the straightforward single‐Q answers:
+BEMA_SINGLE = {
+    **{f'Q{i}': str(ans) for i, ans in zip(
+        [1,2,4,5,6,7,8,9,10,11,12,14,15,17,18,19,20,21,22,23,24,25,26,27,30,31],
+        [1,1,5,1,4,5,2,2,6, 5, 5, 4, 2, 7, 4, 2, 2, 7, 1, 5, 5, 1, 4, 4, 3, 6, 4]
+    )}
+}
+# Q3 rule mapping Q2→correct Q3
+BEMA_Q3_MAP = {str(k):str(v) for k,v in zip([1,2,3,4,5,6],[2,4,3,5,6,7])}
+# Q16 rule: same as Q14 AND Q15==7
+# Q28+29 combined must be (2,3)
+BEMA_ATT_Q, BEMA_ATT_A = 'Q53','5'
+BEMA_ID = 'Q54'
+
+# EBAPS: map raw choice ('1'–'5') → score for each question Q1–Q30
+EBAPS_SCORE = {
+    'Q2':  {'1':4,'2':3,'3':1,'4':0.5,'5':0},
+    'Q3':  {'1':0,'2':1.5,'3':2.5,'4':3.5,'5':4},
+    'Q4':  {'1':0,'2':1,'3':2,'4':3.5,'5':4},
+    'Q5':  {'1':4,'2':3,'3':2,'4':1,'5':0},
+    'Q6':  {'1':0,'2':1,'3':2,'4':3,'5':4},
+    'Q7':  {'1':4,'2':4,'3':2,'4':1,'5':0},
+    'Q8':  {'1':4,'2':3,'3':2,'4':1,'5':0},
+    'Q9':  {'1':4,'2':3,'3':1.5,'4':0.5,'5':0},
+    'Q10':  {'1':0,'2':1,'3':2,'4':3,'5':4},
+    'Q11': {'1':4,'2':3,'3':2,'4':1,'5':0},
+    'Q12': {'1':0,'2':1,'3':2,'4':3,'5':4},
+    'Q13': {'1':0,'2':0.5,'3':1,'4':3,'5':4},
+    'Q14': {'1':4,'2':3,'3':1,'4':0.5,'5':0},
+    'Q15': {'1':4,'2':3,'3':2,'4':1,'5':0},
+    'Q16': {'1':4,'2':3,'3':2,'4':1,'5':0},
+    'Q17': {'1':0,'2':1,'3':2,'4':3,'5':4},
+    'Q18': {'1':4,'2':3,'3':1.5,'4':0.5,'5':0},
+    'Q20': {'1':4,'2':3.5,'3':1.5,'4':0.5,'5':0},
+    'Q21': {'1':4,'2':0,'3':3,'4':2,'5':1},
+    'Q22': {'1':4,'2':0,'3':3,'4':2,'5':1},
+    'Q23': {'1':4,'2':3,'3':2,'4':1,'5':0},
+    'Q24': {'1':4,'2':3,'3':2,'4':1,'5':0},
+    'Q25': {'1':0,'2':4,'3':1,'4':2,'5':3},
+    'Q27': {'1':4,'2':4,'3':2,'4':1,'5':0},
+    'Q28': {'1':0,'2':1,'3':2,'4':4,'5':4},
+    'Q29': {'1':4,'2':4,'3':2,'4':1,'5':0},
+    'Q30': {'1':4,'2':4,'3':2,'4':1,'5':0},
+    'Q31': {'1':0,'2':1,'3':2,'4':3,'5':4},
+    'Q32': {'1':0,'2':2,'3':4,'4':2,'5':0},
+    'Q33': {'1':0,'2':1,'3':2,'4':3,'5':4},
 }
 
-ID_COL = "identifier"  # column in CSV that stores the self‑chosen ID
+# maximum possible scores
+MAX_EMCS   = len(EMCS_KEY)
+MAX_BEMA   = len(BEMA_SINGLE) + 1 + 1 + 1  # single + Q3 + Q16 + Q28+29
+MAX_EBAPS  = sum(4 for _ in EBAPS_SCORE)   # each question max = 4
 
-##################################
-# Core analysis helper functions  #
-##################################
+# ─────────────────────────────────────────────────────────────────────────────
+# GRADING FUNCTIONS
 
-def grade_responses(df: pd.DataFrame, key: List[str]) -> pd.Series:
-    """Return a Series of integer scores for each student submission."""
-    # assume responses are in columns Q1, Q2, ... matching key order
-    question_cols = [f"Q{i+1}" for i in range(len(key))]
-    comparison = df[question_cols] == key
-    return comparison.sum(axis=1)
+def grade_emcs(df):
+    df = df[df[EMCS_ATT_Q] == EMCS_ATT_A].copy()
+    def sc(r):
+        return sum(r[q] == a for q, a in EMCS_KEY.items())
+    out = df[[EMCS_ID]].copy()
+    out['pre_post_score'] = df.apply(sc, axis=1)
+    return out
 
+def grade_bema(df):
+    df = df[df[BEMA_ATT_Q] == BEMA_ATT_A].copy()
+    def sc(r):
+        s = 0
+        # Q1,2
+        if r['Q1']=='1': s+=1
+        if r['Q2']=='1': s+=1
+        # Q3 rule
+        if r['Q2'] in BEMA_Q3_MAP and r['Q3']==BEMA_Q3_MAP[r['Q2']]:
+            s+=1
+        # single‐Q keys
+        for q, a in BEMA_SINGLE.items():
+            if r[q] == a:
+                s+=1
+        # Q16 rule
+        if r['Q16'] == r['Q14'] and r['Q15']=='7':
+            s+=1
+        # Q28+29 combined
+        if r['Q28']=='2' and r['Q29']=='3':
+            s+=1
+        return s
 
-def attention_pass(df: pd.DataFrame, idx: int, correct: str) -> pd.Series:
-    """Boolean Series indicating which students passed the attention check."""
-    col = f"Q{idx + 1}"
-    return df[col] == correct
+    out = df[[BEMA_ID]].copy()
+    out['pre_post_score'] = df.apply(sc, axis=1)
+    return out
 
-
-def best_match(id_str: str, candidates: List[str], threshold: float = 0.8) -> Tuple[str | None, float]:
-    """Return the candidate with highest similarity above *threshold* (ratio)."""
-    if not id_str or not candidates:
-        return None, 0.0
-    similarities = [(cand, difflib.SequenceMatcher(None, id_str, cand).ratio()) for cand in candidates]
-    best_cand, best_score = max(similarities, key=lambda x: x[1])
-    return (best_cand, best_score) if best_score >= threshold else (None, best_score)
-
-
-def pair_submissions(pre: pd.DataFrame, post: pd.DataFrame, threshold: float = 0.8) -> List[Tuple[int, int]]:
-    """Return list of index pairs (pre_idx, post_idx) for matched identifiers."""
-    post_ids = post[ID_COL].astype(str).tolist()
-    used_post_idx = set()
-    pairs: List[Tuple[int, int]] = []
-
-    for pre_idx, pre_id in pre[ID_COL].astype(str).items():
-        match, score = best_match(pre_id, [pid for i, pid in enumerate(post_ids) if i not in used_post_idx], threshold)
-        if match is not None:
-            post_idx = post_ids.index(match)
-            pairs.append((pre_idx, post_idx))
-            used_post_idx.add(post_idx)
-    return pairs
-
-
-def normalized_gain(pre_score: int, post_score: int, max_score: int) -> float | None:
-    """Calculate Hake's normalized gain. Return None if undefined."""
-    if pre_score == max_score:
-        return None  # already perfect; gain undefined
-    return (post_score - pre_score) / (max_score - pre_score)
-
-
-@dataclass
-class SummaryStatistics:
-    test_name: str
-    n_pre: int
-    n_post: int
-    n_matched: int
-    class_pre_mean: float
-    class_post_mean: float
-    class_gain_mean: float
-
-    def __str__(self) -> str:
-        return (
-            f"\nSummary for {self.test_name}\n" + "-" * (12 + len(self.test_name)) +
-            f"\nPre‑test respondents           : {self.n_pre}" +
-            f"\nPost‑test respondents          : {self.n_post}" +
-            f"\nMatched identifier pairs       : {self.n_matched}" +
-            f"\nClass mean score (pre)         : {self.class_pre_mean:.2f}" +
-            f"\nClass mean score (post)        : {self.class_post_mean:.2f}" +
-            f"\nMean normalized gain (matched) : {self.class_gain_mean:.3f}\n"
+def grade_ebaps(df):
+    def sc(r):
+        return sum(
+            EBAPS_SCORE[q].get(str(r[q]), 0)
+            for q in EBAPS_SCORE
         )
+    out = pd.DataFrame({ 'idx': df.index })
+    out['pre_post_score'] = df.apply(sc, axis=1)
+    return out
 
+# ─────────────────────────────────────────────────────────────────────────────
+# MATCHING & STATISTICS
 
-#################
-# Main pipeline #
-#################
+def fuzzy_match_ids(pre_ids, post_ids, threshold=80):
+    """Return dict pre_id → post_id for those matching above threshold."""
+    
+    def _valid(x):
+        return pd.notna(x) and str(x).strip() != ''
+    
+    
+    # Filter out any empty or whitespace-only IDs
+    valid_pre  = [str(x) for x in pre_ids  if _valid(x)]
+    valid_post = [str(x) for x in post_ids if _valid(x)]
+    
+    
+    matches = {}
+    used_post = set()
+    for pre in valid_pre:
+        best, score = process.extractOne(pre, valid_post)
+        if score >= threshold and best not in used_post:
+            matches[pre] = best
+            used_post.add(best)
+    return matches
 
-def analyze(pre_csv: Path, post_csv: Path, test_name: str, id_threshold: float = 0.8) -> SummaryStatistics:
-    meta = TEST_KEYS[test_name]
-    key = meta["key"]
-    att_idx = meta["attention_idx"]
-    att_ans = meta["attention_answer"]
-
-    pre_df = pd.read_csv(pre_csv)
-    post_df = pd.read_csv(post_csv)
-
-    # grade and filter attention check
-    pre_df["score"] = grade_responses(pre_df, key)
-    post_df["score"] = grade_responses(post_df, key)
-
-    pre_df = pre_df[attention_pass(pre_df, att_idx, att_ans)]
-    post_df = post_df[attention_pass(post_df, att_idx, att_ans)]
-
-    # match identifiers with fuzzy matching
-    pairs = pair_submissions(pre_df, post_df, threshold=id_threshold)
-
-    gains = []
-    for pre_idx, post_idx in pairs:
-        pre_s = int(pre_df.loc[pre_idx, "score"])
-        post_s = int(post_df.loc[post_idx, "score"])
-        g = normalized_gain(pre_s, post_s, max_score=len(key))
-        if g is not None:
-            gains.append(g)
-
-    summary = SummaryStatistics(
-        test_name=test_name,
-        n_pre=len(pre_df),
-        n_post=len(post_df),
-        n_matched=len(pairs),
-        class_pre_mean=pre_df["score"].mean(),
-        class_post_mean=post_df["score"].mean(),
-        class_gain_mean=float(np.mean(gains)) if gains else float("nan"),
+def compute_summary(df_pairs, max_score, all_pre, all_post):
+    """df_pairs has columns: pre_score, post_score"""
+    df = df_pairs.copy()
+    df['gain_norm'] = (
+        (df['post_score'] - df['pre_score']) /
+        (max_score - df['pre_score'])
     )
-    return summary
+    mean_pre_total  = all_pre.mean()
+    mean_post_total = all_post.mean()
+    class_norm_gain = (
+            (mean_post_total - mean_pre_total)
+            / (max_score - mean_pre_total)
+        )
+    
+    summary = {
+        'n_matched':      len(df),
+        'mean_pre':       df['pre_score'].mean(),
+        'mean_post':      df['post_score'].mean(),
+        'mean_norm_gain': df['gain_norm'].mean(),
 
+        'n_pre_total':   len(all_pre),
+        'n_post_total':  len(all_post),
+        'mean_pre_total':  all_pre.mean(),
+        'mean_post_total': all_post.mean(),
+        'class_norm_gain':  class_norm_gain,
+        }
+        
+        
+    return df, summary
 
-########################
-# Command‑line wrapper #
-########################
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN ANALYSIS
 
-def _cli() -> None:
-    parser = argparse.ArgumentParser(description="Analyze pre/post concept inventory data")
-    parser.add_argument("pre", type=Path, help="CSV file with pre‑test responses")
-    parser.add_argument("post", type=Path, help="CSV file with post‑test responses")
-    parser.add_argument("--test", choices=TEST_KEYS.keys(), required=True, help="Which inventory (EMCS, BEMA, EBAPS)")
-    parser.add_argument("--threshold", type=float, default=0.8, help="Fuzzy ID match similarity threshold [0‑1]")
-    args = parser.parse_args()
+def analyze(pre_path, post_path, test_type):
+    pre_df  = pd.read_csv(pre_path)
+    post_df = pd.read_csv(post_path)
+    
+    
+    #Filter out short responses
+    for name, df in (('pre', pre_df), ('post', post_df)):
+        # convert to numeric, coercing errors → NaN
+        df['Duration (in seconds)'] = pd.to_numeric(
+            df['Duration (in seconds)'],
+            errors='coerce'
+        )
+        # drop NaNs
+        df.dropna(subset=['Duration (in seconds)'], inplace=True)
+        # keep only ≥60 s
+        filtered = df.loc[df['Duration (in seconds)'] >= 60]
+        if name == 'pre':
+            pre_df = filtered.copy()
+        else:
+            post_df = filtered.copy()
 
-    summary = analyze(args.pre, args.post, args.test, args.threshold)
-    print(summary)
+    if test_type == 'EMCS':
+        pre_sc  = grade_emcs(pre_df)
+        post_sc = grade_emcs(post_df)
+        id_col  = EMCS_ID
+        max_sc  = MAX_EMCS
 
+    elif test_type == 'BEMA':
+        pre_sc  = grade_bema(pre_df)
+        post_sc = grade_bema(post_df)
+        id_col  = BEMA_ID
+        max_sc  = MAX_BEMA
 
-if __name__ == "__main__":
-    _cli()
+    elif test_type == 'EBAPS':
+        pre_sc  = grade_ebaps(pre_df)
+        post_sc = grade_ebaps(post_df)
+        id_col  = 'idx'          # use row‐index
+        max_sc  = MAX_EBAPS
+
+    else:
+        raise ValueError(f"Unknown TEST_TYPE {test_type}")
+
+    # match IDs (for EBAPS these are just 0..n-1)
+    pre_ids  = pre_sc[id_col].astype(str).tolist()
+    post_ids = post_sc[id_col].astype(str).tolist()
+    matches  = fuzzy_match_ids(pre_ids, post_ids)
+    
+    matches = {
+    k: v for k, v in matches.items()
+    if pd.notna(k) and pd.notna(v)
+       and str(k).strip().lower() != 'nan'
+       and str(v).strip().lower() != 'nan'
+       }
+    
+    
+
+    # assemble matched‐pair DataFrame
+    rows = []
+    for pre_id, post_id in matches.items():
+        pre_score  = pre_sc.loc[ pre_sc[id_col].astype(str)==pre_id, 
+                                'pre_post_score'].iloc[0]
+        post_score = post_sc.loc[post_sc[id_col].astype(str)==post_id, 
+                                 'pre_post_score'].iloc[0]
+        rows.append({'pre_id':pre_id,'post_id':post_id,
+                     'pre_score':pre_score,'post_score':post_score})
+    df_pairs = pd.DataFrame(rows)
+    
+    
+    # df_pairs = df_pairs.dropna()
+    
+    all_pre_scores = pre_sc['pre_post_score']
+    all_post_scores = post_sc['pre_post_score']
+
+    # compute statistics
+    df_results, summary = compute_summary(df_pairs, 
+                                          max_sc, 
+                                          all_pre_scores,
+                                          all_post_scores)
+    
+    
+    
+    return df_results, summary
+
+if __name__ == '__main__':
+    df_results, summary = analyze(PRE_PATH, POST_PATH, TEST_TYPE)
+    print(f"\n--- {TEST_TYPE} RESULTS ---")
+    print(f"Matched students: {summary['n_matched']}")
+    print(f"Mean matched pre-test score : {summary['mean_pre']:.2f} / {MAX_EMCS if TEST_TYPE=='EMCS' else MAX_BEMA if TEST_TYPE=='BEMA' else MAX_EBAPS}")
+    print(f"Mean matched post-test score: {summary['mean_post']:.2f}")
+    print(f"Mean matched normalized gain: {summary['mean_norm_gain']:.3f}\n")
+    
+    # Individual data
+    print("\nIndividual gains:")
+    print(df_results[['pre_id','post_id','pre_score','post_score','gain_norm']])
+    
+    # Class-wide stats
+    print(f"\nClass-wide pre-test mean :       {summary['mean_pre_total']:.2f}  (n={summary['n_pre_total']})")
+    print(f"Class-wide post-test mean:       {summary['mean_post_total']:.2f}  (n={summary['n_post_total']})")
+    print(f"Class-wide normalized gain:      {summary['class_norm_gain']:.3f}")
+    
+
