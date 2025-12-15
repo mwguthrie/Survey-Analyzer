@@ -1,4 +1,4 @@
-Program for analyzing concept inventory data in CSV form, exported directly from Qualtrics.
+Program for analyzing concept inventory data in CSV form, exported directly from Qualtrics (Export VALUES from Qualtrics!).
 
 Currently supported surveys are EMCS, BEMA, and EBAPS
 
