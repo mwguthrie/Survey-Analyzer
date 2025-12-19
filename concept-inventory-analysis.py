@@ -1,13 +1,14 @@
 import pandas as pd
 from fuzzywuzzy import process
 
-
+# ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION: put your CSV paths and test type here
-PRE_PATH   = 'EMCS Pre - 1501-007 - Fa23_May 7, 2025_11.26.csv'
-POST_PATH  = 'EMCS Post - 1501-007 - Fa23_May 7, 2025_11.26.csv'
-TEST_TYPE  = 'EMCS'   # "EMCS' or 'BEMA' or 'EBAPS'
+PRE_PATH   = 'BEMA Pre - 1502-006 - Fa25_December 15, 2025_09.45.csv'
+POST_PATH  = 'BEMA Post - 1502-006 - Fa25_December 15, 2025_09.37.csv'
+TEST_TYPE  = 'BEMA'   # "EMCS' or 'BEMA' or 'EBAPS'
+# ─────────────────────────────────────────────────────────────────────────────
 
-
+# ─────────────────────────────────────────────────────────────────────────────
 # ANSWER KEYS
 
 # EMCS: 25 scored questions + attention Q34, ID Q35
@@ -19,11 +20,13 @@ EMCS_ATT_Q, EMCS_ATT_A = 'Q34', '5'
 EMCS_ID = 'Q35'
 
 # BEMA: individual keys plus the special rules
-# first the straightforward single‐Q answers:
+# first the straightforward single‐Q answers (numeric: A=1, B=2, ..., G=7):
+# Note: some exports duplicate the Q19 header; pandas renames the second to "Q19.1".
+# We handle Q13/Q19 explicitly in the grader to be robust to that duplication.
 BEMA_SINGLE = {
     **{f'Q{i}': str(ans) for i, ans in zip(
-        [1,2,4,5,6,7,8,9,10,11,12,14,15,17,18,19,20,21,22,23,24,25,26,27,30,31],
-        [1,1,5,1,4,5,2,2,6, 5, 5, 4, 2, 7, 4, 2, 2, 7, 1, 5, 5, 1, 4, 4, 3, 6, 4]
+        [4,5,6,7,8,9,10,11,12,14,15,17,18,20,21,22,23,24,25,26,27,30,31],
+        [5,1,4,5,2,2, 6, 5, 5, 2, 7, 4, 2, 7, 1, 5, 5, 1, 4, 4, 3, 6, 4]
     )}
 }
 # Q3 rule mapping Q2→correct Q3
@@ -34,43 +37,44 @@ BEMA_ATT_Q, BEMA_ATT_A = 'Q53','5'
 BEMA_ID = 'Q54'
 
 # EBAPS: map raw choice ('1'–'5') → score for each question Q1–Q30
+# (A=1, B=2, C=3, D=4, E=5 in the exported CSV)
 EBAPS_SCORE = {
-    'Q2':  {'1':4,'2':3,'3':1,'4':0.5,'5':0},
-    'Q3':  {'1':0,'2':1.5,'3':2.5,'4':3.5,'5':4},
-    'Q4':  {'1':0,'2':1,'3':2,'4':3.5,'5':4},
-    'Q5':  {'1':4,'2':3,'3':2,'4':1,'5':0},
-    'Q6':  {'1':0,'2':1,'3':2,'4':3,'5':4},
-    'Q7':  {'1':4,'2':4,'3':2,'4':1,'5':0},
-    'Q8':  {'1':4,'2':3,'3':2,'4':1,'5':0},
-    'Q9':  {'1':4,'2':3,'3':1.5,'4':0.5,'5':0},
-    'Q10':  {'1':0,'2':1,'3':2,'4':3,'5':4},
-    'Q11': {'1':4,'2':3,'3':2,'4':1,'5':0},
-    'Q12': {'1':0,'2':1,'3':2,'4':3,'5':4},
-    'Q13': {'1':0,'2':0.5,'3':1,'4':3,'5':4},
-    'Q14': {'1':4,'2':3,'3':1,'4':0.5,'5':0},
+    'Q1':  {'1':4,'2':3,'3':1,'4':0.5,'5':0},
+    'Q2':  {'1':0,'2':1.5,'3':2.5,'4':3.5,'5':4},
+    'Q3':  {'1':0,'2':1,'3':2,'4':3.5,'5':4},
+    'Q4':  {'1':4,'2':3,'3':2,'4':1,'5':0},
+    'Q5':  {'1':0,'2':1,'3':2,'4':3,'5':4},
+    'Q6':  {'1':4,'2':4,'3':2,'4':1,'5':0},
+    'Q7':  {'1':4,'2':3,'3':2,'4':1,'5':0},
+    'Q8':  {'1':4,'2':3,'3':1.5,'4':0.5,'5':0},
+    'Q9':  {'1':0,'2':1,'3':2,'4':3,'5':4},
+    'Q10': {'1':4,'2':3,'3':2,'4':1,'5':0},
+    'Q11': {'1':0,'2':1,'3':2,'4':3,'5':4},
+    'Q12': {'1':0,'2':0.5,'3':1,'4':3,'5':4},
+    'Q13': {'1':4,'2':3,'3':1,'4':0.5,'5':0},
+    'Q14': {'1':4,'2':3,'3':2,'4':1,'5':0},
     'Q15': {'1':4,'2':3,'3':2,'4':1,'5':0},
-    'Q16': {'1':4,'2':3,'3':2,'4':1,'5':0},
-    'Q17': {'1':0,'2':1,'3':2,'4':3,'5':4},
-    'Q18': {'1':4,'2':3,'3':1.5,'4':0.5,'5':0},
-    'Q20': {'1':4,'2':3.5,'3':1.5,'4':0.5,'5':0},
-    'Q21': {'1':4,'2':0,'3':3,'4':2,'5':1},
-    'Q22': {'1':4,'2':0,'3':3,'4':2,'5':1},
-    'Q23': {'1':4,'2':3,'3':2,'4':1,'5':0},
-    'Q24': {'1':4,'2':3,'3':2,'4':1,'5':0},
-    'Q25': {'1':0,'2':4,'3':1,'4':2,'5':3},
+    'Q16': {'1':0,'2':1,'3':2,'4':3,'5':4},
+    'Q17': {'1':4,'2':3,'3':1.5,'4':0.5,'5':0},
+    'Q18': {'1':4,'2':3.5,'3':1.5,'4':0.5,'5':0},
+    'Q19': {'1':4,'2':0,'3':3,'4':2,'5':1},
+    'Q20': {'1':4,'2':0,'3':3,'4':2,'5':1},
+    'Q21': {'1':4,'2':3,'3':2,'4':1,'5':0},
+    'Q22': {'1':4,'2':3,'3':2,'4':1,'5':0},
+    'Q23': {'1':0,'2':4,'3':1,'4':2,'5':3},
+    'Q24': {'1':4,'2':4,'3':2,'4':1,'5':0},
+    'Q25': {'1':0,'2':1,'3':2,'4':4,'5':4},
+    'Q26': {'1':4,'2':4,'3':2,'4':1,'5':0},
     'Q27': {'1':4,'2':4,'3':2,'4':1,'5':0},
-    'Q28': {'1':0,'2':1,'3':2,'4':4,'5':4},
-    'Q29': {'1':4,'2':4,'3':2,'4':1,'5':0},
-    'Q30': {'1':4,'2':4,'3':2,'4':1,'5':0},
-    'Q31': {'1':0,'2':1,'3':2,'4':3,'5':4},
-    'Q32': {'1':0,'2':2,'3':4,'4':2,'5':0},
-    'Q33': {'1':0,'2':1,'3':2,'4':3,'5':4},
+    'Q28': {'1':0,'2':1,'3':2,'4':3,'5':4},
+    'Q29': {'1':0,'2':2,'3':4,'4':2,'5':0},
+    'Q30': {'1':0,'2':1,'3':2,'4':3,'5':4},
 }
 
 # maximum possible scores
 MAX_EMCS   = len(EMCS_KEY)
-MAX_BEMA   = len(BEMA_SINGLE) + 1 + 1 + 1  # single + Q3 + Q16 + Q28+29
-MAX_EBAPS  = sum(4 for _ in EBAPS_SCORE)   # each question max = 4
+MAX_BEMA   = 30  # BEMA totals 30 points (Q28&Q29 count as one question)
+MAX_EBAPS  = 4 * len(EBAPS_SCORE)   # each question max = 4
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GRADING FUNCTIONS
@@ -93,10 +97,23 @@ def grade_bema(df):
         # Q3 rule
         if r['Q2'] in BEMA_Q3_MAP and r['Q3']==BEMA_Q3_MAP[r['Q2']]:
             s+=1
+        # Q13 and Q19 (some exports duplicate Q19; pandas renames the second to Q19.1)
+        # Official key: Q13=D(4), Q19=B(2).
+        q13_val = r.get('Q13')
+        if q13_val is None and ('Q19.1' in r.index) and ('Q19' in r.index):
+            # If there are duplicate Q19 headers, the first "Q19" sometimes corresponds to Q13.
+            q13_val = r.get('Q19')
+        if q13_val == '4':
+            s += 1
+
+        q19_val = r.get('Q19.1') if ('Q19.1' in r.index) else r.get('Q19')
+        if q19_val == '2':
+            s += 1
+
         # single‐Q keys
         for q, a in BEMA_SINGLE.items():
-            if r[q] == a:
-                s+=1
+            if r.get(q) == a:
+                s += 1
         # Q16 rule
         if r['Q16'] == r['Q14'] and r['Q15']=='7':
             s+=1
@@ -122,7 +139,7 @@ def grade_ebaps(df):
 # ─────────────────────────────────────────────────────────────────────────────
 # MATCHING & STATISTICS
 
-def fuzzy_match_ids(pre_ids, post_ids, threshold=80):
+def fuzzy_match_ids(pre_ids, post_ids, threshold=70):
     """Return dict pre_id → post_id for those matching above threshold."""
     
     def _valid(x):
@@ -179,6 +196,9 @@ def compute_summary(df_pairs, max_score, all_pre, all_post):
 def analyze(pre_path, post_path, test_type):
     pre_df  = pd.read_csv(pre_path)
     post_df = pd.read_csv(post_path)
+    
+    # print(list(pre_df))
+    # print(list(post_df))
     
     
     #Filter out short responses
